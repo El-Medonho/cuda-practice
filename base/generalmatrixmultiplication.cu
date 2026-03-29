@@ -17,18 +17,26 @@ void def_mult(int *A, int *B, int *C, int n, int k, int m){
 }
 
 __global__ void gpu_mult(int *A, int *B, int *C, int n, int k, int m){
-    int i = threadIdx.x, j = threadIdx.y;
-    C[i*m+j] = 0;
-    for(int p = 0; p < k; p++) C[i*m+j] += A[i*k+p] * B[p*m+j];
+    int I = threadIdx.x + blockIdx.x * blockDim.x, J = threadIdx.y + blockIdx.y * blockDim.y;
+    for(int i = I; i < n; i += gridDim.x * blockDim.x) {
+        for(int j = J; j < m; j += gridDim.y * blockDim.y) {
+            C[i*m+j] = 0;
+            for(int p = 0; p < k; p++) C[i*m+j] += A[i*k+p] * B[p*m+j];
+        }
+    }
 }
 
 __global__ void gpu_single_mult(int *A, int *B, int *C, int n, int k, int m){
-    int q = threadIdx.x;
-    int i = q/m, j = q%m;
-    C[q] = 0;
-    for(int p = 0; p < k; p++) C[q] += A[i*k+p] * B[p*m+j];
+    int Q = threadIdx.x + blockIdx.x * blockDim.x;
+
+    for(int q = Q; q < n*m; q += gridDim.x * blockDim.x){
+        C[q] = 0;
+        int i = q/m, j = q%m;
+        for(int p = 0; p < k; p++) C[q] += A[i*k+p] * B[p*m+j];
+    }
 }
 
+const int TileWidth = 16;
 
 signed main(){
 
@@ -36,8 +44,8 @@ signed main(){
 
     float defTime = 0, gpuTime = 0, gpuSingleTime = 0;
 
-    int n = 4, k = 6, m = 9;
-    int A[n*k], B[k*m], CDef[n*m], CGpu[n*m], CGpuSingle[n*m];
+    int n = 1024, k = 2048, m = 512;
+    vector<int> A(n*k), B(k*m), CDef(n*m), CGpu(n*m), CGpuSingle(n*m);
 
     for(int i = 0; i < n; i++){
         for(int j = 0; j < k; j++) {
@@ -52,11 +60,11 @@ signed main(){
     }
 
     // run CPU def version
-    for(int i = 0; i < warmUpCnt; i++) def_mult(A, B, CDef, n, k, m);
+    for(int i = 0; i < warmUpCnt; i++) def_mult(A.data(), B.data(), CDef.data(), n, k, m);
 
     for(int i = 0; i < runCnt; i++){
         auto start = chrono::steady_clock::now();
-        def_mult(A, B, CDef, n, k, m);
+        def_mult(A.data(), B.data(), CDef.data(), n, k, m);
         auto end = chrono::steady_clock::now();
         defTime += (chrono::duration<double>(end-start)).count();
     }
@@ -69,65 +77,77 @@ signed main(){
     cudaMalloc((void**) &Bd, k*m*sizeof(int));
     cudaMalloc((void**) &Cd, n*m*sizeof(int));
 
-    cudaMemcpy(Ad, A, n*k*sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(Bd, B, m*k*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Ad, A.data(), n*k*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Bd, B.data(), m*k*sizeof(int), cudaMemcpyHostToDevice);
 
-    dim3 grid(1), threads(n, m), singleThreads(n*m);
+    dim3 grid((n + TileWidth - 1)/TileWidth, (m + TileWidth - 1)/TileWidth), gridSingle(n*m/(TileWidth*TileWidth)), 
+    block(TileWidth, TileWidth), blockSingle(TileWidth * TileWidth);
+
+    // cout << "Tamanhos: " << grid.x << ' ' << grid.y << '\n' << gridSingle.x << '\n';
 
     for(int i = 0; i < warmUpCnt; i++) {
-        gpu_mult<<<grid, threads>>>(Ad, Bd, Cd, n, k, m);
+        gpu_mult<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
         cudaDeviceSynchronize();
     }
     
     for(int i = 0; i < runCnt; i++){
         auto start = chrono::steady_clock::now();
-        gpu_mult<<<grid, threads>>>(Ad, Bd, Cd, n, k, m);
+        gpu_mult<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
         cudaDeviceSynchronize();
         auto end = chrono::steady_clock::now();
         gpuTime += (chrono::duration<double>(end-start)).count();
     }
     gpuTime /= runCnt;
 
-    cudaMemcpy(CGpu, Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(CGpu.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
 
     for(int i = 0; i < n*m; i++){
         if(CGpu[i] != CDef[i]){
             cout << "Gpu and Def answers differ!\n";
-            return 0;
+            goto cleanup;
         }
     }
 
     // run GPU single line version
 
-    cudaMemcpy(Cd, CGpuSingle, n*m*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Cd, CGpuSingle.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
     for(int i = 0; i < warmUpCnt; i++) {
-        gpu_single_mult<<<grid, singleThreads>>>(Ad, Bd, Cd, n, k, m);
+        gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
         cudaDeviceSynchronize();
     }
     
     for(int i = 0; i < runCnt; i++){
         auto start = chrono::steady_clock::now();
-        gpu_single_mult<<<grid, singleThreads>>>(Ad, Bd, Cd, n, k, m);
+        gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
         cudaDeviceSynchronize();
         auto end = chrono::steady_clock::now();
-        gpuTime += (chrono::duration<double>(end-start)).count();
+        gpuSingleTime += (chrono::duration<double>(end-start)).count();
     }
-    gpuTime /= runCnt;
+    gpuSingleTime /= runCnt;
 
-    cudaMemcpy(CGpu, Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(CGpu.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
 
     for(int i = 0; i < n*m; i++){
         if(CGpu[i] != CDef[i]){
             cout << "Gpu single run and Def answers differ!\n";
-            return 0;
+            goto cleanup;
         }
     }
 
     cout << "Runs successful! Results match!\n";
-    cout << fixed << setprecision(4) << 
+    cout << fixed << setprecision(8) << 
     "DefTime: " << defTime << '\n' << 
     "GpuTime: " << gpuTime << '\n' << 
     "GpuSingleTime: " << gpuSingleTime << '\n';
+
+    cout << "Printing first few results:\n";
+    for(int i = 0; i < min((size_t)8, CDef.size()); i++) cout << CDef[i] << ' ';
+    cout << '\n';
+
+cleanup:
+    cudaFree(Ad);
+    cudaFree(Bd);
+    cudaFree(Cd);
 
     return 0;
 }
