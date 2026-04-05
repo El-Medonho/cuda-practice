@@ -139,9 +139,10 @@ __global__ void gpu_2d_tiling_mult_per_thread(int *A, int *B, int *C, int n, int
     
         __syncthreads();
 
-        for(int j = 0; j < 8; j++){
-            for(int i = 0; i < 8; i++){
-                Ct[j] += As[i + j*8 + ind/64*8*8] * Bs[ind%64 + i * 64];
+        for(int i = 0; i < 8; i++){
+            int bs_val = Bs[ind%64 + i * 64];
+            for(int j = 0; j < 8; j++){
+                Ct[j] += As[i + j*8 + ind/64*8*8] * bs_val;
             } 
         }
         A += 8; B += 8 * m;
