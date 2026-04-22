@@ -154,17 +154,74 @@ __global__ void gpu_2d_tiling_mult_per_thread(int *A, int *B, int *C, int n, int
     }
 }
 
+// this function is not set to work in every matrix. All sides must be multiples of 64
+__global__ void gpu_2d_blocktiling(int *A, int *B, int *C, int n, int k, int m){
+    
+    // Dimensions of a single thread block
+    const int TN = 8, TM = 8;
+    // Dimensions of output tile computed by whole block
+    const int BN = 128, BM = 64;
+    int id = threadIdx.x + threadIdx.y*blockDim.x;
+    const int BK = 32;
+
+
+    __shared__ int As[BN*BK], Bs[BK*BM];
+    int Cr[TN*TM] = {0};
+    int Ar[TN] = {0}, Br[TM] = {0};
+
+    A += BN*blockIdx.x*k, B += BM*blockIdx.y;
+    C += BN*blockIdx.x*m + BM*blockIdx.y;
+
+    int rowA = id/BK, colA = id%BK;
+    int rowB = id/64, colB = id%64;
+
+    for(int d = 0; d < k; d += BK){
+        __syncthreads();
+
+        for(int j = 0; j*128 < BN*BK; j++){
+            As[j*128 + rowA * BK + colA] = A[j*4*k + rowA * k + colA];
+        }
+
+        for(int j = 0; j*128 < BM*BK; j++){
+            Bs[j*128 + rowB * BM + colB] = B[j*2*m + rowB * m + colB];
+        }
+
+        __syncthreads();
+
+        for(int cDot = id&31, cnt = 0; cnt < BK; cnt++, cDot = (cDot == 31) ? 0 : cDot+1 ){
+            for(int i = 0; i < TN; i++) Ar[i] = As[(threadIdx.x*TN+i)*BK + cDot];
+            for(int i = 0, idx = id&7; i < TM; i++, idx = (idx == 7) ? 0 : idx+1) Br[idx] = Bs[(threadIdx.y*TM+idx) + cDot*BM];
+
+            for(int i = 0; i < TN; i++){
+                for(int j = 0; j < TM; j++){
+                    Cr[i*8+j] += Ar[i]*Br[j];
+                }
+            }
+        }
+
+        A += BK; B += BK*m;
+    }
+
+    for(int i = 0; i < 8; i++){
+        for(int j = 0; j < 8; j++){
+            C[(threadIdx.x*8+i)*m + threadIdx.y*8+j] = Cr[i*8+j];
+        }
+    }
+
+    return;
+}
+
 const int TileWidth = 16;
 
 signed main(){
 
     int runCnt = 100, warmUpCnt = 5;
 
-    float defTime = 0, geminiCpuTime = 0, gpuTime = 0, gpuSingleTime = 0, gpuMemCoalTime = 0, gpu2dTilingTime = 0, gpu2dTilingMultThreadTime = 0;
+    float defTime = 0, geminiCpuTime = 0, gpuTime = 0, gpuSingleTime = 0, gpuMemCoalTime = 0, gpu2dTilingTime = 0, gpu2dTilingMultThreadTime = 0, gpu2dBlocktilingTime = 0;
 
-    int n = 256, k = 512, m = 128;
+    int n = 1024, k = 2048, m = 512;
     // int n = 128, k = 256, m = 64;
-    vector<int> A(n*k), B(k*m), CDef(n*m), CGpu(n*m), CGpuSingle(n*m), CGpuMemCoal(n*m), CGpu2dTiling(n*m), CGpu2dTilingMultThread(n*m);
+    vector<int> A(n*k), B(k*m), CDef(n*m), CGpu(n*m), CGpuSingle(n*m), CGpuMemCoal(n*m), CGpu2dTiling(n*m), CGpu2dTilingMultThread(n*m), CGpu2dBlocktiling(n*m);
     for(int i = 0; i < n; i++){
         for(int j = 0; j < k; j++) {
             A[i*k+j] = uid(rng);
@@ -178,26 +235,27 @@ signed main(){
     }
 
     // run CPU def version
-    for(int i = 0; i < warmUpCnt; i++) def_mult(A.data(), B.data(), CDef.data(), n, k, m);
+    def_mult(A.data(), B.data(), CDef.data(), n, k, m);
+    // for(int i = 0; i < warmUpCnt; i++) def_mult(A.data(), B.data(), CDef.data(), n, k, m);
 
-    for(int i = 0; i < runCnt; i++){
-        auto start = chrono::steady_clock::now();
-        def_mult(A.data(), B.data(), CDef.data(), n, k, m);
-        auto end = chrono::steady_clock::now();
-        defTime += (chrono::duration<double>(end-start)).count();
-    }
-    defTime /= runCnt;
+    // for(int i = 0; i < runCnt; i++){
+    //     auto start = chrono::steady_clock::now();
+    //     def_mult(A.data(), B.data(), CDef.data(), n, k, m);
+    //     auto end = chrono::steady_clock::now();
+    //     defTime += (chrono::duration<double>(end-start)).count();
+    // }
+    // defTime /= runCnt;
 
     // run gemini CPU version
-    for(int i = 0; i < warmUpCnt; i++) opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
+    // for(int i = 0; i < warmUpCnt; i++) opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
 
-    for(int i = 0; i < runCnt; i++){
-        auto start = chrono::steady_clock::now();
-        opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
-        auto end = chrono::steady_clock::now();
-        geminiCpuTime += (chrono::duration<double>(end-start)).count();
-    }
-    geminiCpuTime /= runCnt;
+    // for(int i = 0; i < runCnt; i++){
+    //     auto start = chrono::steady_clock::now();
+    //     opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
+    //     auto end = chrono::steady_clock::now();
+    //     geminiCpuTime += (chrono::duration<double>(end-start)).count();
+    // }
+    // geminiCpuTime /= runCnt;
 
     // run GPU matrix version
     int *Ad, *Bd, *Cd;
@@ -212,6 +270,7 @@ signed main(){
     dim3 grid((n + TileWidth - 1)/TileWidth, (m + TileWidth - 1)/TileWidth), gridSingle(n*m/(TileWidth*TileWidth)), 
     gridMemCoal((m + TileWidth - 1)/TileWidth, (n + TileWidth - 1)/TileWidth), grid2dTilingMultThread(n/64, m/64),
     block(TileWidth, TileWidth), blockSingle(TileWidth * TileWidth), block2dTilingMultThread(64, 8);
+    dim3 grid2dBlockTiling(n/128, m/64), block2dBlockTiling(16, 8);
 
     // cout << "Tamanhos: " << grid.x << ' ' << grid.y << '\n' << gridSingle.x << '\n';
 
@@ -342,6 +401,32 @@ signed main(){
         }
     }
 
+    // run GPU 2d block tiling version
+
+    cudaMemcpy(Cd, CGpu2dBlocktiling.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+    for(int i = 0; i < warmUpCnt; i++) {
+        gpu_2d_blocktiling<<<grid2dBlockTiling, block2dBlockTiling>>>(Ad, Bd, Cd, n, k, m);
+        cudaDeviceSynchronize();
+    }
+    
+    for(int i = 0; i < runCnt; i++){
+        auto start = chrono::steady_clock::now();
+        gpu_2d_blocktiling<<<grid2dBlockTiling, block2dBlockTiling>>>(Ad, Bd, Cd, n, k, m);
+        cudaDeviceSynchronize();
+        auto end = chrono::steady_clock::now();
+        gpu2dBlocktilingTime += (chrono::duration<double>(end-start)).count();
+    }
+    gpu2dBlocktilingTime /= runCnt;
+
+    cudaMemcpy(CGpu2dBlocktiling.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+
+    for(int i = 0; i < n*m; i++){
+        if(CGpu2dBlocktiling[i] != CDef[i]){
+            cout << "Gpu 2d block tiling and Def answers differ!\n";
+            goto cleanup;
+        }
+    }
+
     cout << "Runs successful! Results match!\n";
     cout << fixed << setprecision(8) << 
     "Cpu naive time: " << defTime << '\n' << 
@@ -350,7 +435,8 @@ signed main(){
     "Gpu naive 1d naive time: " << gpuSingleTime << '\n' <<
     "Gpu memory coalescing time: " << gpuMemCoalTime << '\n' <<
     "Gpu 2d tiling time: " << gpu2dTilingTime << '\n' <<
-    "Gpu 2d tiling time with multiple work per processor: " << gpu2dTilingMultThreadTime << '\n'
+    "Gpu 2d tiling time with multiple work per processor: " << gpu2dTilingMultThreadTime << '\n' << 
+    "Gpu 2d block tiling time: " << gpu2dBlocktilingTime << '\n'
     ;
 
     cout << "Printing first few results:\n";
