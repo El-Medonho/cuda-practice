@@ -1,2 +1,4 @@
 *.txt
 *.out
+hostfile
+cluster_config.mk

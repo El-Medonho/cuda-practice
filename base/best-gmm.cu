@@ -103,12 +103,14 @@ __global__ void GMM_ref(float *A, float *B, float *C, int n, int k, int m){
 
 signed main(){
 
-    int runCnt = 100, warmUpCnt = 5;
+    // int runCnt = 100, warmUpCnt = 5;
+    int runCnt = 1, warmUpCnt = 1;
 
     float defTime = 0, refTime = 0, cublasTime = 0;
 
     int n = 16384, k = 16384, m = 16384;
     // int n = 8192, k = 16384, m = 4096;
+    // int n = 1024, k = 2048, m = 512;
     // int n = 256, k = 512, m = 128;
     
     vector<float> A(n*k), B(k*m), C(n*m, 0), CRef(n*m, 0), CCublas(n*m, 0);
