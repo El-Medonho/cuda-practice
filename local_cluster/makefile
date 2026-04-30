@@ -1,21 +1,36 @@
 -include cluster_config.mk
 
-CUDA_PATH = /usr/local/cuda
-MPI_INCLUDE = -I/usr/lib/x86_64-linux-gnu/openmpi/include -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi
 WORKER_IP ?= 127.0.0.1
-WORKER_USER ?= user
+WORKER_USER ?= bfred
+WORKER_DIR ?= ~/cuda-practice/local_cluster/
 
-.PHONY: all clean run
+CUDA_PATH ?= /usr/local/cuda
+MPI_INCLUDE = -I/usr/lib/x86_64-linux-gnu/openmpi/include -I/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi
 
-all: test
+NVCC = nvcc
+MPICXX = mpicxx
+NVCC_FLAGS = -O3 $(MPI_INCLUDE) 
+LD_FLAGS = -L$(CUDA_PATH)/lib64 -lcudart_static -lrt -lpthread -ldl
+MPI_RUN_FLAGS = --mca btl tcp,self --mca btl_tcp_if_include tailscale0 --mca oob_tcp_if_include tailscale0 --prefix /usr -x LD_LIBRARY_PATH=/usr/lib/wsl/lib --hostfile hostfile
 
-test: test.cu
-	nvcc -c test.cu $(MPI_INCLUDE) -o test.o
-	mpicxx test.o -o test -L$(CUDA_PATH)/lib64 -lcudart_static -lrt -lpthread -ldl
+TARGETS = test clusteredgemm
+
+.PHONY: all clean run-test run-gemm
+
+all: $(TARGETS)
+%.o: %.cu
+	$(NVCC) -c $< $(NVCC_FLAGS) -o $@
+
+%: %.o
+	$(MPICXX) $< -o $@ $(LD_FLAGS)
 
 clean:
-	rm -f test.o test
+	rm -f *.o $(TARGETS)
 
-run: test
-	scp ./test bfred@100.107.8.11:~/cuda-practice/local_cluster/
-	mpirun --mca btl tcp,self --mca btl_tcp_if_include tailscale0 --mca oob_tcp_if_include tailscale0 --prefix /usr -x LD_LIBRARY_PATH=/usr/lib/wsl/lib --hostfile hostfile ./test
+run-test: test
+	scp ./test $(WORKER_USER)@$(WORKER_IP):$(WORKER_DIR)
+	mpirun $(MPI_RUN_FLAGS) ./test
+
+run-gemm: clusteredgemm
+	scp ./clusteredgemm $(WORKER_USER)@$(WORKER_IP):$(WORKER_DIR)
+	mpirun $(MPI_RUN_FLAGS) ./clusteredgemm

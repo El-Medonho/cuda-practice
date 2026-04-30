@@ -156,7 +156,7 @@ signed main(){
     cublasTime /= runCnt;
     cudaMemcpy(CCublas.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
 
-    #pragma endregion CPU_FUNCS
+    #pragma endregion CUBLAS
 
     dim3 gridRef(n/64, m/64), blockRef(64, 8);
     GMM_ref<<<gridRef, blockRef>>>(Ad, Bd, Cd, n, k, m);
