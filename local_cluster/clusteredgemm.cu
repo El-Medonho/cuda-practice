@@ -10,7 +10,7 @@ const long long seed = 998244353, seed2 = 998244853, seed3 = 1e9+7;
 const float half = (seed3+1)/2;
 
 const float eps = 1.0f;
-const int softSize = 128;
+const int softSize = 2048;
 
 __global__ void GMM_hard(float *A, float *B, float *C, int n, int k, int m, bool baseline = false){
     if(blockIdx.x < softSize/128 && blockIdx.y < softSize/64 && !baseline) return;
@@ -105,9 +105,12 @@ __global__ void GMM_soft(float *A, float *B, float *C, int n, int k, int m){
 }
 
 signed main(int argc, char** argv){
-
-    int n = 16384, k = 16384, m = 16384;
-    
+    int n = 8192, k = 65536, m = 8192;
+    // int n = 16384, k = 32768, m = 16384;
+    // int n = 16384, k = 16384, m = 16384;
+    cout << "n = " << n << 
+    ", m = " << m << 
+    ", k = " << k << endl;
     
     MPI_Init(&argc, &argv);
     
@@ -124,12 +127,12 @@ signed main(int argc, char** argv){
         float *Ad, *Bd, *Cd;
         for(int i = 0; i < n; i++){
             for(int j = 0; j < k; j++) {
-                A[i*k+j] = ((seed*i*k+j)%seed3-half)/seed3;
+                A[i*k+j] = ((seed*i*k+j)%seed3-half)/(seed3*10);
             }
         }
         for(int i = 0; i < k; i++){
             for(int j = 0; j < m; j++) {
-                B[i*m+j] = ((seed2*i*k+j)%seed3-half)/seed3;
+                B[i*m+j] = ((seed2*i*k+j)%seed3-half)/(seed3*10);
             }
         }
         cudaMalloc(((void**) &Ad), n*k*sizeof(float));
@@ -177,12 +180,12 @@ signed main(int argc, char** argv){
         float *Ad_base, *Bd_base, *Cd_base;
         for(int i = 0; i < n; i++){
             for(int j = 0; j < k; j++) {
-                A_base[i*k+j] = ((seed*i*k+j)%seed3-half)/seed3;
+                A_base[i*k+j] = ((seed*i*k+j)%seed3-half)/(seed3*10);
             }
         }
         for(int i = 0; i < k; i++){
             for(int j = 0; j < m; j++) {
-                B_base[i*m+j] = ((seed2*i*k+j)%seed3-half)/seed3;
+                B_base[i*m+j] = ((seed2*i*k+j)%seed3-half)/(seed3*10);
             }
         }
         cudaMalloc(((void**) &Ad_base), n*k*sizeof(float));
@@ -219,12 +222,12 @@ signed main(int argc, char** argv){
         float *Ad, *Bd, *Cd;
         for(int i = 0; i < softSize; i++){
             for(int j = 0; j < k; j++) {
-                Al[i*k+j] = ((seed*i*k+j)%seed3-half)/seed3;
+                Al[i*k+j] = ((seed*i*k+j)%seed3-half)/(seed3*10);
             }
         }
         for(int i = 0; i < k; i++){
             for(int j = 0; j < softSize; j++) {
-                Bl[i*softSize+j] = ((seed2*i*k+j)%seed3-half)/seed3;
+                Bl[i*softSize+j] = ((seed2*i*k+j)%seed3-half)/(seed3*10);
             }
         }
 
@@ -237,6 +240,7 @@ signed main(int argc, char** argv){
         dim3 softGrid(softSize/64, softSize/64), softBlock(64, 8);
 
         double start_gpu = MPI_Wtime();
+        cout << "[Rank 1 - GTX 1050 Ti] Checkpoint at " << (start_gpu - start_global) << " seconds.\n";
         GMM_soft<<<softGrid, softBlock>>>(Ad, Bd, Cd, softSize, k, softSize);
         cudaDeviceSynchronize();
         double end_gpu = MPI_Wtime();
