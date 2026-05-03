@@ -108,7 +108,8 @@ signed main(){
 
     float defTime = 0, refTime = 0, cublasTime = 0;
 
-    int n = 16384, k = 16384, m = 16384;
+    // int n = 16384, k = 16384, m = 16384;
+    int n = 2048, k = 2048, m = 2048;
     // int n = 8192, k = 16384, m = 4096;
     // int n = 1024, k = 2048, m = 512;
     // int n = 256, k = 512, m = 128;

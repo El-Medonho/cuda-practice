@@ -1,5 +1,7 @@
 #include "bits/stdc++.h"
 #include <omp.h>
+#include <cublas_v2.h>
+#include <cmath>
 
 using namespace std;
 
@@ -213,170 +215,193 @@ __global__ void gpu_2d_blocktiling(int *A, int *B, int *C, int n, int k, int m){
 
 const int TileWidth = 16;
 
-signed main(){
+signed main(int argc, char** argv){
 
-    int runCnt = 100, warmUpCnt = 5;
+    int runCnt = 20, warmUpCnt = 3;
 
-    float defTime = 0, geminiCpuTime = 0, gpuTime = 0, gpuSingleTime = 0, gpuMemCoalTime = 0, gpu2dTilingTime = 0, gpu2dTilingMultThreadTime = 0, gpu2dBlocktilingTime = 0;
+    float cublasTime = 0, defTime = 0, geminiCpuTime = 0, gpuTime = 0, gpuSingleTime = 0, gpuMemCoalTime = 0, gpu2dTilingTime = 0, gpu2dTilingMultThreadTime = 0, gpu2dBlocktilingTime = 0;
+    bool benchmarking = false;
 
-    int n = 1024, k = 2048, m = 512;
-    // int n = 128, k = 256, m = 64;
+    long long n = 1024, k = 2048, m = 512;
+    if (argc >= 5) {
+        benchmarking = stoi(argv[1]);
+        n = stoi(argv[2]);
+        k = stoi(argv[3]);
+        m = stoi(argv[4]);
+    }
+
+
     vector<int> A(n*k), B(k*m), CDef(n*m), CGpu(n*m), CGpuSingle(n*m), CGpuMemCoal(n*m), CGpu2dTiling(n*m), CGpu2dTilingMultThread(n*m), CGpu2dBlocktiling(n*m);
     for(int i = 0; i < n; i++){
         for(int j = 0; j < k; j++) {
             A[i*k+j] = uid(rng);
         }
     }
-
+    
     for(int i = 0; i < k; i++){
         for(int j = 0; j < m; j++) {
             B[i*m+j] = uid(rng);
         }
     }
 
-    // run CPU def version
-    def_mult(A.data(), B.data(), CDef.data(), n, k, m);
-    // for(int i = 0; i < warmUpCnt; i++) def_mult(A.data(), B.data(), CDef.data(), n, k, m);
-
-    // for(int i = 0; i < runCnt; i++){
-    //     auto start = chrono::steady_clock::now();
-    //     def_mult(A.data(), B.data(), CDef.data(), n, k, m);
-    //     auto end = chrono::steady_clock::now();
-    //     defTime += (chrono::duration<double>(end-start)).count();
-    // }
-    // defTime /= runCnt;
-
-    // run gemini CPU version
-    // for(int i = 0; i < warmUpCnt; i++) opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
-
-    // for(int i = 0; i < runCnt; i++){
-    //     auto start = chrono::steady_clock::now();
-    //     opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
-    //     auto end = chrono::steady_clock::now();
-    //     geminiCpuTime += (chrono::duration<double>(end-start)).count();
-    // }
-    // geminiCpuTime /= runCnt;
-
+    
+    
+    if(n*m*k <= (1LL<<30)){
+        // run CPU def version
+        def_mult(A.data(), B.data(), CDef.data(), n, k, m);
+        for(int i = 0; i < warmUpCnt; i++) def_mult(A.data(), B.data(), CDef.data(), n, k, m);
+        
+        for(int i = 0; i < runCnt; i++){
+            auto start = chrono::steady_clock::now();
+            def_mult(A.data(), B.data(), CDef.data(), n, k, m);
+            auto end = chrono::steady_clock::now();
+            defTime += (chrono::duration<double>(end-start)).count();
+        }
+        defTime /= runCnt;
+        
+        // run gemini CPU version
+        for(int i = 0; i < warmUpCnt; i++) opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
+        
+        for(int i = 0; i < runCnt; i++){
+            auto start = chrono::steady_clock::now();
+            opt_cpu_mult(A.data(), B.data(), CDef.data(), n, k, m);
+            auto end = chrono::steady_clock::now();
+            geminiCpuTime += (chrono::duration<double>(end-start)).count();
+        }
+        geminiCpuTime /= runCnt;
+    } else {
+        defTime = -1.0;
+        geminiCpuTime = -1.0;
+    }
+    
     // run GPU matrix version
     int *Ad, *Bd, *Cd;
-
+    
     cudaMalloc((void**) &Ad, n*k*sizeof(int));
     cudaMalloc((void**) &Bd, k*m*sizeof(int));
     cudaMalloc((void**) &Cd, n*m*sizeof(int));
-
+    
     cudaMemcpy(Ad, A.data(), n*k*sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(Bd, B.data(), m*k*sizeof(int), cudaMemcpyHostToDevice);
-
+    
     dim3 grid((n + TileWidth - 1)/TileWidth, (m + TileWidth - 1)/TileWidth), gridSingle(n*m/(TileWidth*TileWidth)), 
     gridMemCoal((m + TileWidth - 1)/TileWidth, (n + TileWidth - 1)/TileWidth), grid2dTilingMultThread(n/64, m/64),
     block(TileWidth, TileWidth), blockSingle(TileWidth * TileWidth), block2dTilingMultThread(64, 8);
     dim3 grid2dBlockTiling(n/128, m/64), block2dBlockTiling(16, 8);
+    
+    // #pragma region CUBLAS
 
+    // vector<float> CCublas(n*m, 0)
+    // cublasHandle_t handle;
+    // cublasCreate(&handle);
+    // float alpha = 1.0f, beta = 0.0f;
+
+    // // Warmup cuBLAS (Note the swap of A and B for Row-Major to Col-Major trick)
+    // for(int i = 0; i < warmUpCnt; i++) {
+    //     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, Bd, m, Ad, k, &beta, Cd, m);
+    // }
+    // cudaDeviceSynchronize();
+
+    // for(int i = 0; i < runCnt; i++){
+    //     auto start = chrono::steady_clock::now();
+    //     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, Bd, m, Ad, k, &beta, Cd, m);
+    //     cudaDeviceSynchronize();
+    //     auto end = chrono::steady_clock::now();
+    //     cublasTime += (chrono::duration<double>(end-start)).count();
+    // }
+    // cublasTime /= runCnt;
+    // cudaMemcpy(CCublas.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
+
+    // #pragma endregion CUBLAS
     // cout << "Tamanhos: " << grid.x << ' ' << grid.y << '\n' << gridSingle.x << '\n';
+    
+    
+    if(n*m*k <= (1LL<<36)){
+        
+        for(int i = 0; i < warmUpCnt; i++) {
+            gpu_mult<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+        }
+        
+        for(int i = 0; i < runCnt; i++){
+            auto start = chrono::steady_clock::now();
+            gpu_mult<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+            auto end = chrono::steady_clock::now();
+            gpuTime += (chrono::duration<double>(end-start)).count();
+        }
+        gpuTime /= runCnt;
+        
+        cudaMemcpy(CGpu.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+    
+        
+        // run GPU single line version
+        
+        cudaMemcpy(Cd, CGpuSingle.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+        for(int i = 0; i < warmUpCnt; i++) {
+            gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+        }
+        
+        for(int i = 0; i < runCnt; i++){
+            auto start = chrono::steady_clock::now();
+            gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+            auto end = chrono::steady_clock::now();
+            gpuSingleTime += (chrono::duration<double>(end-start)).count();
+        }
+        gpuSingleTime /= runCnt;
+        
+        cudaMemcpy(CGpuSingle.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+        
+        
+        // run GPU memory coalescing version
+        
+        cudaMemcpy(Cd, CGpuMemCoal.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+        for(int i = 0; i < warmUpCnt; i++) {
+            gpu_mem_coalescing<<<gridMemCoal, block>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+        }
+        
+        for(int i = 0; i < runCnt; i++){
+            auto start = chrono::steady_clock::now();
+            gpu_mem_coalescing<<<gridMemCoal, block>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+            auto end = chrono::steady_clock::now();
+            gpuMemCoalTime += (chrono::duration<double>(end-start)).count();
+        }
+        gpuMemCoalTime /= runCnt;
+        
+        cudaMemcpy(CGpuMemCoal.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
 
-    for(int i = 0; i < warmUpCnt; i++) {
-        gpu_mult<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
+        // run GPU 2d tiling version
+        
+        cudaMemcpy(Cd, CGpu2dTiling.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+        for(int i = 0; i < warmUpCnt; i++) {
+            gpu_2d_tiling<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+        }
+        
+        for(int i = 0; i < runCnt; i++){
+            auto start = chrono::steady_clock::now();
+            gpu_2d_tiling<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
+            cudaDeviceSynchronize();
+            auto end = chrono::steady_clock::now();
+            gpu2dTilingTime += (chrono::duration<double>(end-start)).count();
+        }
+        gpu2dTilingTime /= runCnt;
+        
+        cudaMemcpy(CGpu2dTiling.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+    } else{
+        gpuTime = -1.0;
+        gpuSingleTime = -1.0;
+        gpuMemCoalTime = -1.0;
+        gpu2dTilingTime = -1.0;
     }
     
-    for(int i = 0; i < runCnt; i++){
-        auto start = chrono::steady_clock::now();
-        gpu_mult<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-        auto end = chrono::steady_clock::now();
-        gpuTime += (chrono::duration<double>(end-start)).count();
-    }
-    gpuTime /= runCnt;
-
-    cudaMemcpy(CGpu.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < n*m; i++){
-        if(CGpu[i] != CDef[i]){
-            cout << "Gpu and Def answers differ!\n";
-            goto cleanup;
-        }
-    }
-
-    // run GPU single line version
-
-    cudaMemcpy(Cd, CGpuSingle.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
-    for(int i = 0; i < warmUpCnt; i++) {
-        gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-    }
     
-    for(int i = 0; i < runCnt; i++){
-        auto start = chrono::steady_clock::now();
-        gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-        auto end = chrono::steady_clock::now();
-        gpuSingleTime += (chrono::duration<double>(end-start)).count();
-    }
-    gpuSingleTime /= runCnt;
-
-    cudaMemcpy(CGpuSingle.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < n*m; i++){
-        if(CGpuSingle[i] != CDef[i]){
-            cout << "Gpu single run and Def answers differ!\n";
-            goto cleanup;
-        }
-    }
-
-    // run GPU memory coalescing version
-
-    cudaMemcpy(Cd, CGpuMemCoal.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
-    for(int i = 0; i < warmUpCnt; i++) {
-        gpu_mem_coalescing<<<gridMemCoal, block>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-    }
-    
-    for(int i = 0; i < runCnt; i++){
-        auto start = chrono::steady_clock::now();
-        gpu_mem_coalescing<<<gridMemCoal, block>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-        auto end = chrono::steady_clock::now();
-        gpuMemCoalTime += (chrono::duration<double>(end-start)).count();
-    }
-    gpuMemCoalTime /= runCnt;
-
-    cudaMemcpy(CGpuMemCoal.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < n*m; i++){
-        if(CGpuMemCoal[i] != CDef[i]){
-            cout << "Gpu memory coalescing and Def answers differ!\n";
-            goto cleanup;
-        }
-    }
-
-    // run GPU 2d tiling version
-
-    cudaMemcpy(Cd, CGpu2dTiling.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
-    for(int i = 0; i < warmUpCnt; i++) {
-        gpu_2d_tiling<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-    }
-    
-    for(int i = 0; i < runCnt; i++){
-        auto start = chrono::steady_clock::now();
-        gpu_2d_tiling<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
-        cudaDeviceSynchronize();
-        auto end = chrono::steady_clock::now();
-        gpu2dTilingTime += (chrono::duration<double>(end-start)).count();
-    }
-    gpu2dTilingTime /= runCnt;
-
-    cudaMemcpy(CGpu2dTiling.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < n*m; i++){
-        if(CGpu2dTiling[i] != CDef[i]){
-            cout << "Gpu 2d tiling and Def answers differ!\n";
-            goto cleanup;
-        }
-    }
-
     // run GPU 2d tiling with multiple work per processor version
-
+    
     cudaMemcpy(Cd, CGpu2dTilingMultThread.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
     for(int i = 0; i < warmUpCnt; i++) {
         gpu_2d_tiling_mult_per_thread<<<grid2dTilingMultThread, block2dTilingMultThread>>>(Ad, Bd, Cd, n, k, m);
@@ -391,18 +416,12 @@ signed main(){
         gpu2dTilingMultThreadTime += (chrono::duration<double>(end-start)).count();
     }
     gpu2dTilingMultThreadTime /= runCnt;
-
+    
     cudaMemcpy(CGpu2dTilingMultThread.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < n*m; i++){
-        if(CGpu2dTilingMultThread[i] != CDef[i]){
-            cout << "Gpu 2d tiling with multiple work per processor and Def answers differ!\n";
-            goto cleanup;
-        }
-    }
-
+    
+    
     // run GPU 2d block tiling version
-
+    
     cudaMemcpy(Cd, CGpu2dBlocktiling.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
     for(int i = 0; i < warmUpCnt; i++) {
         gpu_2d_blocktiling<<<grid2dBlockTiling, block2dBlockTiling>>>(Ad, Bd, Cd, n, k, m);
@@ -417,36 +436,86 @@ signed main(){
         gpu2dBlocktilingTime += (chrono::duration<double>(end-start)).count();
     }
     gpu2dBlocktilingTime /= runCnt;
-
+    
     cudaMemcpy(CGpu2dBlocktiling.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i = 0; i < n*m; i++){
-        if(CGpu2dBlocktiling[i] != CDef[i]){
-            cout << "Gpu 2d block tiling and Def answers differ!\n";
-            goto cleanup;
+    
+    
+    if(!benchmarking && (n*m*k <= (1<<30))){
+        for(int i = 0; i < n*m; i++){
+            if(CGpu[i] != CDef[i]){
+                cout << "Gpu and Def answers differ!\n";
+                goto cleanup;
+            }
+        }
+        for(int i = 0; i < n*m; i++){
+            if(CGpuSingle[i] != CDef[i]){
+                cout << "Gpu single run and Def answers differ!\n";
+                goto cleanup;
+            }
+        }
+        for(int i = 0; i < n*m; i++){
+            if(CGpuMemCoal[i] != CDef[i]){
+                cout << "Gpu memory coalescing and Def answers differ!\n";
+                goto cleanup;
+            }
+        }
+        for(int i = 0; i < n*m; i++){
+            if(CGpu2dTiling[i] != CDef[i]){
+                cout << "Gpu 2d tiling and Def answers differ!\n";
+                goto cleanup;
+            }
+        }
+        for(int i = 0; i < n*m; i++){
+            if(CGpu2dTilingMultThread[i] != CDef[i]){
+                cout << "Gpu 2d tiling with multiple work per processor and Def answers differ!\n";
+                goto cleanup;
+            }
+        }
+        for(int i = 0; i < n*m; i++){
+            if(CGpu2dBlocktiling[i] != CDef[i]){
+                cout << "Gpu 2d block tiling and Def answers differ!\n";
+                goto cleanup;
+            }
         }
     }
 
-    cout << "Runs successful! Results match!\n";
-    cout << fixed << setprecision(8) << 
-    "Cpu naive time: " << defTime << '\n' << 
-    "Cpu gemini time: " << geminiCpuTime << '\n' << 
-    "Gpu naive time: " << gpuTime << '\n' << 
-    "Gpu naive 1d naive time: " << gpuSingleTime << '\n' <<
-    "Gpu memory coalescing time: " << gpuMemCoalTime << '\n' <<
-    "Gpu 2d tiling time: " << gpu2dTilingTime << '\n' <<
-    "Gpu 2d tiling time with multiple work per processor: " << gpu2dTilingMultThreadTime << '\n' << 
-    "Gpu 2d block tiling time: " << gpu2dBlocktilingTime << '\n'
-    ;
 
-    cout << "Printing first few results:\n";
-    for(int i = 0; i < min((size_t)8, CDef.size()); i++) cout << CDef[i] << ' ';
-    cout << '\n';
+
+    if(!benchmarking){
+        cout << "Runs successful! Results match!\n";
+        cout << fixed << setprecision(8) << 
+        "Cpu naive time: " << defTime << '\n' << 
+        "Cpu gemini time: " << geminiCpuTime << '\n' << 
+        "Gpu naive time: " << gpuTime << '\n' << 
+        "Gpu naive 1d naive time: " << gpuSingleTime << '\n' <<
+        "Gpu memory coalescing time: " << gpuMemCoalTime << '\n' <<
+        "Gpu 2d tiling time: " << gpu2dTilingTime << '\n' <<
+        "Gpu 2d tiling time with multiple work per processor: " << gpu2dTilingMultThreadTime << '\n' << 
+        "Gpu 2d block tiling time: " << gpu2dBlocktilingTime << '\n'
+        ;
+    
+        cout << "Printing first few results:\n";
+        for(int i = 0; i < min((size_t)8, CDef.size()); i++) cout << CDef[i] << ' ';
+        cout << '\n';
+    }
 
 cleanup:
     cudaFree(Ad);
     cudaFree(Bd);
     cudaFree(Cd);
+
+    if(benchmarking){
+        cout << n << "," << k << "," << m << ","
+             << fixed << setprecision(6)
+             << defTime << "," 
+             << geminiCpuTime << "," 
+             << gpuTime << "," 
+             << gpuSingleTime << ","
+             << gpuMemCoalTime << ","
+             << gpu2dTilingTime << ","
+             << gpu2dTilingMultThreadTime << "," 
+             << gpu2dBlocktilingTime << "\n";
+    }
 
     return 0;
 }
