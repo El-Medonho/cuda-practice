@@ -6,12 +6,13 @@
 using namespace std;
 
 mt19937_64 rng(chrono::steady_clock::now().time_since_epoch().count());
-uniform_int_distribution<int> uid(0, 1<<30);
+uniform_real_distribution<float> uid(-0.5f, 0.5f);
+const float eps = 1e-1;
 
 //#region 
 #pragma region CPU_FUNCS
 
-void def_mult(int *A, int *B, int *C, int n, int k, int m){
+void def_mult(float *A, float *B, float *C, int n, int k, int m){
     for(int i = 0; i < n; i++){
         for(int j = 0; j < m; j++){
             C[i*m+j] = 0;
@@ -25,7 +26,7 @@ void def_mult(int *A, int *B, int *C, int n, int k, int m){
 // I asked gemini to make the best cpu matrix multiplication that he could
 // Using __restrict__ tells the compiler the arrays don't overlap in memory,
 // which allows it to safely generate fast SIMD (vectorized) instructions.
-void opt_cpu_mult(const int* __restrict__ A, const int* __restrict__ B, int* __restrict__ C, int n, int k, int m) {
+void opt_cpu_mult(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C, int n, int k, int m) {
     
     // 1. Initialize C array to 0 in parallel
     #pragma omp parallel for
@@ -46,7 +47,7 @@ void opt_cpu_mult(const int* __restrict__ A, const int* __restrict__ B, int* __r
                 for (int ii = i; ii < std::min(i + BLOCK_SIZE, n); ++ii) {
                     for (int pp = p; pp < std::min(p + BLOCK_SIZE, k); ++pp) {
                         
-                        int a_val = A[ii * k + pp];
+                        float a_val = A[ii * k + pp];
                         
                         // Because 'jj' is the innermost loop, B and C are accessed perfectly sequentially!
                         #pragma omp simd
@@ -64,7 +65,7 @@ void opt_cpu_mult(const int* __restrict__ A, const int* __restrict__ B, int* __r
 #pragma endregion CPU_FUNCS
 // #endregion
 
-__global__ void gpu_mult(int *A, int *B, int *C, int n, int k, int m){
+__global__ void gpu_mult(float *A, float *B, float *C, int n, int k, int m){
     int I = threadIdx.x + blockIdx.x * blockDim.x, J = threadIdx.y + blockIdx.y * blockDim.y;
     for(int i = I; i < n; i += gridDim.x * blockDim.x) {
         for(int j = J; j < m; j += gridDim.y * blockDim.y) {
@@ -74,7 +75,7 @@ __global__ void gpu_mult(int *A, int *B, int *C, int n, int k, int m){
     }
 }
 
-__global__ void gpu_mem_coalescing(int *A, int *B, int *C, int n, int k, int m){
+__global__ void gpu_mem_coalescing(float *A, float *B, float *C, int n, int k, int m){
     int J = threadIdx.x + blockIdx.x * blockDim.x, I = threadIdx.y + blockIdx.y * blockDim.y;
     for(int i = I; i < n; i += gridDim.x * blockDim.x) {
         for(int j = J; j < m; j += gridDim.y * blockDim.y) {
@@ -85,7 +86,7 @@ __global__ void gpu_mem_coalescing(int *A, int *B, int *C, int n, int k, int m){
 }
 
 
-__global__ void gpu_single_mult(int *A, int *B, int *C, int n, int k, int m){
+__global__ void gpu_single_mult(float *A, float *B, float *C, int n, int k, int m){
     int Q = threadIdx.x + blockIdx.x * blockDim.x;
 
     for(int q = Q; q < n*m; q += gridDim.x * blockDim.x){
@@ -96,13 +97,14 @@ __global__ void gpu_single_mult(int *A, int *B, int *C, int n, int k, int m){
 }
 
 // this function is not set to work in every matrix. All sides must be multiples of blockDim (prob 16)
-__global__ void gpu_2d_tiling(int *A, int *B, int *C, int n, int k, int m){
+__global__ void gpu_2d_tiling(float *A, float *B, float *C, int n, int k, int m){
     int blockSize = blockDim.x;
-    __shared__ int As[16*16], Bs[16*16];
+    __shared__ float As[16*16], Bs[16*16];
     A += blockIdx.x * blockSize * k; B += blockIdx.y * blockSize;
     C += blockIdx.x * blockSize * m + blockIdx.y * blockSize;
 
-    int temp = 0, d = 0;
+    float temp = 0;
+    int d = 0;
 
     while(d < k){
         __syncthreads();
@@ -122,9 +124,9 @@ __global__ void gpu_2d_tiling(int *A, int *B, int *C, int n, int k, int m){
 
 
 // this function is not set to work in every matrix. All sides must be multiples of 64
-__global__ void gpu_2d_tiling_mult_per_thread(int *A, int *B, int *C, int n, int k, int m){
-    __shared__ int As[64*8], Bs[64*8];
-    int Ct[8];
+__global__ void gpu_2d_tiling_mult_per_thread(float *A, float *B, float *C, int n, int k, int m){
+    __shared__ float As[64*8], Bs[64*8];
+    float Ct[8];
     for(int i = 0; i < 8; i++) Ct[i] = 0;
     int ind = threadIdx.y * blockDim.x + threadIdx.x;
 
@@ -142,7 +144,7 @@ __global__ void gpu_2d_tiling_mult_per_thread(int *A, int *B, int *C, int n, int
         __syncthreads();
 
         for(int i = 0; i < 8; i++){
-            int bs_val = Bs[ind%64 + i * 64];
+            float bs_val = Bs[ind%64 + i * 64];
             for(int j = 0; j < 8; j++){
                 Ct[j] += As[i + j*8 + ind/64*8*8] * bs_val;
             } 
@@ -157,7 +159,7 @@ __global__ void gpu_2d_tiling_mult_per_thread(int *A, int *B, int *C, int n, int
 }
 
 // this function is not set to work in every matrix. All sides must be multiples of 64
-__global__ void gpu_2d_blocktiling(int *A, int *B, int *C, int n, int k, int m){
+__global__ void gpu_2d_blocktiling(float *A, float *B, float *C, int n, int k, int m){
     
     // Dimensions of a single thread block
     const int TN = 8, TM = 8;
@@ -167,9 +169,9 @@ __global__ void gpu_2d_blocktiling(int *A, int *B, int *C, int n, int k, int m){
     const int BK = 32;
 
 
-    __shared__ int As[BN*BK], Bs[BK*BM];
-    int Cr[TN*TM] = {0};
-    int Ar[TN] = {0}, Br[TM] = {0};
+    __shared__ float As[BN*BK], Bs[BK*BM];
+    float Cr[TN*TM] = {0};
+    float Ar[TN] = {0}, Br[TM] = {0};
 
     A += BN*blockIdx.x*k, B += BM*blockIdx.y;
     C += BN*blockIdx.x*m + BM*blockIdx.y;
@@ -231,7 +233,7 @@ signed main(int argc, char** argv){
     }
 
 
-    vector<int> A(n*k), B(k*m), CDef(n*m), CGpu(n*m), CGpuSingle(n*m), CGpuMemCoal(n*m), CGpu2dTiling(n*m), CGpu2dTilingMultThread(n*m), CGpu2dBlocktiling(n*m);
+    vector<float> A(n*k), B(k*m), CDef(n*m), CGpu(n*m), CGpuSingle(n*m), CGpuMemCoal(n*m), CGpu2dTiling(n*m), CGpu2dTilingMultThread(n*m), CGpu2dBlocktiling(n*m);
     for(int i = 0; i < n; i++){
         for(int j = 0; j < k; j++) {
             A[i*k+j] = uid(rng);
@@ -275,45 +277,44 @@ signed main(int argc, char** argv){
     }
     
     // run GPU matrix version
-    int *Ad, *Bd, *Cd;
+    float *Ad, *Bd, *Cd;
     
-    cudaMalloc((void**) &Ad, n*k*sizeof(int));
-    cudaMalloc((void**) &Bd, k*m*sizeof(int));
-    cudaMalloc((void**) &Cd, n*m*sizeof(int));
+    cudaMalloc((void**) &Ad, n*k*sizeof(float));
+    cudaMalloc((void**) &Bd, k*m*sizeof(float));
+    cudaMalloc((void**) &Cd, n*m*sizeof(float));
     
-    cudaMemcpy(Ad, A.data(), n*k*sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(Bd, B.data(), m*k*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Ad, A.data(), n*k*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(Bd, B.data(), m*k*sizeof(float), cudaMemcpyHostToDevice);
     
     dim3 grid((n + TileWidth - 1)/TileWidth, (m + TileWidth - 1)/TileWidth), gridSingle(n*m/(TileWidth*TileWidth)), 
     gridMemCoal((m + TileWidth - 1)/TileWidth, (n + TileWidth - 1)/TileWidth), grid2dTilingMultThread(n/64, m/64),
     block(TileWidth, TileWidth), blockSingle(TileWidth * TileWidth), block2dTilingMultThread(64, 8);
     dim3 grid2dBlockTiling(n/128, m/64), block2dBlockTiling(16, 8);
     
-    // #pragma region CUBLAS
+    #pragma region CUBLAS
 
-    // vector<float> CCublas(n*m, 0)
-    // cublasHandle_t handle;
-    // cublasCreate(&handle);
-    // float alpha = 1.0f, beta = 0.0f;
+    vector<float> CCublas(n*m, 0);
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    float alpha = 1.0f, beta = 0.0f;
 
-    // // Warmup cuBLAS (Note the swap of A and B for Row-Major to Col-Major trick)
-    // for(int i = 0; i < warmUpCnt; i++) {
-    //     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, Bd, m, Ad, k, &beta, Cd, m);
-    // }
-    // cudaDeviceSynchronize();
+    // Warmup cuBLAS (Note the swap of A and B for Row-Major to Col-Major trick)
+    for(int i = 0; i < warmUpCnt; i++) {
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, Bd, m, Ad, k, &beta, Cd, m);
+    }
+    cudaDeviceSynchronize();
 
-    // for(int i = 0; i < runCnt; i++){
-    //     auto start = chrono::steady_clock::now();
-    //     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, Bd, m, Ad, k, &beta, Cd, m);
-    //     cudaDeviceSynchronize();
-    //     auto end = chrono::steady_clock::now();
-    //     cublasTime += (chrono::duration<double>(end-start)).count();
-    // }
-    // cublasTime /= runCnt;
-    // cudaMemcpy(CCublas.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
+    for(int i = 0; i < runCnt; i++){
+        auto start = chrono::steady_clock::now();
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, &alpha, Bd, m, Ad, k, &beta, Cd, m);
+        cudaDeviceSynchronize();
+        auto end = chrono::steady_clock::now();
+        cublasTime += (chrono::duration<double>(end-start)).count();
+    }
+    cublasTime /= runCnt;
+    cudaMemcpy(CCublas.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
 
-    // #pragma endregion CUBLAS
-    // cout << "Tamanhos: " << grid.x << ' ' << grid.y << '\n' << gridSingle.x << '\n';
+    #pragma endregion CUBLAS
     
     
     if(n*m*k <= (1LL<<36)){
@@ -332,12 +333,12 @@ signed main(int argc, char** argv){
         }
         gpuTime /= runCnt;
         
-        cudaMemcpy(CGpu.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(CGpu.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
     
         
         // run GPU single line version
         
-        cudaMemcpy(Cd, CGpuSingle.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(Cd, CGpuSingle.data(), n*m*sizeof(float), cudaMemcpyHostToDevice);
         for(int i = 0; i < warmUpCnt; i++) {
             gpu_single_mult<<<gridSingle, blockSingle>>>(Ad, Bd, Cd, n, k, m);
             cudaDeviceSynchronize();
@@ -352,12 +353,12 @@ signed main(int argc, char** argv){
         }
         gpuSingleTime /= runCnt;
         
-        cudaMemcpy(CGpuSingle.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(CGpuSingle.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
         
         
         // run GPU memory coalescing version
         
-        cudaMemcpy(Cd, CGpuMemCoal.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(Cd, CGpuMemCoal.data(), n*m*sizeof(float), cudaMemcpyHostToDevice);
         for(int i = 0; i < warmUpCnt; i++) {
             gpu_mem_coalescing<<<gridMemCoal, block>>>(Ad, Bd, Cd, n, k, m);
             cudaDeviceSynchronize();
@@ -372,11 +373,11 @@ signed main(int argc, char** argv){
         }
         gpuMemCoalTime /= runCnt;
         
-        cudaMemcpy(CGpuMemCoal.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(CGpuMemCoal.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
 
         // run GPU 2d tiling version
         
-        cudaMemcpy(Cd, CGpu2dTiling.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(Cd, CGpu2dTiling.data(), n*m*sizeof(float), cudaMemcpyHostToDevice);
         for(int i = 0; i < warmUpCnt; i++) {
             gpu_2d_tiling<<<grid, block>>>(Ad, Bd, Cd, n, k, m);
             cudaDeviceSynchronize();
@@ -391,7 +392,7 @@ signed main(int argc, char** argv){
         }
         gpu2dTilingTime /= runCnt;
         
-        cudaMemcpy(CGpu2dTiling.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(CGpu2dTiling.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
     } else{
         gpuTime = -1.0;
         gpuSingleTime = -1.0;
@@ -402,7 +403,7 @@ signed main(int argc, char** argv){
     
     // run GPU 2d tiling with multiple work per processor version
     
-    cudaMemcpy(Cd, CGpu2dTilingMultThread.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Cd, CGpu2dTilingMultThread.data(), n*m*sizeof(float), cudaMemcpyHostToDevice);
     for(int i = 0; i < warmUpCnt; i++) {
         gpu_2d_tiling_mult_per_thread<<<grid2dTilingMultThread, block2dTilingMultThread>>>(Ad, Bd, Cd, n, k, m);
         cudaDeviceSynchronize();
@@ -417,12 +418,12 @@ signed main(int argc, char** argv){
     }
     gpu2dTilingMultThreadTime /= runCnt;
     
-    cudaMemcpy(CGpu2dTilingMultThread.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(CGpu2dTilingMultThread.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
     
     
     // run GPU 2d block tiling version
     
-    cudaMemcpy(Cd, CGpu2dBlocktiling.data(), n*m*sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(Cd, CGpu2dBlocktiling.data(), n*m*sizeof(float), cudaMemcpyHostToDevice);
     for(int i = 0; i < warmUpCnt; i++) {
         gpu_2d_blocktiling<<<grid2dBlockTiling, block2dBlockTiling>>>(Ad, Bd, Cd, n, k, m);
         cudaDeviceSynchronize();
@@ -437,42 +438,42 @@ signed main(int argc, char** argv){
     }
     gpu2dBlocktilingTime /= runCnt;
     
-    cudaMemcpy(CGpu2dBlocktiling.data(), Cd, n*m*sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(CGpu2dBlocktiling.data(), Cd, n*m*sizeof(float), cudaMemcpyDeviceToHost);
     
     
     if(!benchmarking && (n*m*k <= (1<<30))){
         for(int i = 0; i < n*m; i++){
-            if(CGpu[i] != CDef[i]){
+            if(abs(CGpu[i] - CDef[i]) > eps){
                 cout << "Gpu and Def answers differ!\n";
                 goto cleanup;
             }
         }
         for(int i = 0; i < n*m; i++){
-            if(CGpuSingle[i] != CDef[i]){
+            if(abs(CGpuSingle[i] - CDef[i]) > eps){
                 cout << "Gpu single run and Def answers differ!\n";
                 goto cleanup;
             }
         }
         for(int i = 0; i < n*m; i++){
-            if(CGpuMemCoal[i] != CDef[i]){
+            if(abs(CGpuMemCoal[i] - CDef[i]) > eps){
                 cout << "Gpu memory coalescing and Def answers differ!\n";
                 goto cleanup;
             }
         }
         for(int i = 0; i < n*m; i++){
-            if(CGpu2dTiling[i] != CDef[i]){
+            if(abs(CGpu2dTiling[i] - CDef[i]) > eps){
                 cout << "Gpu 2d tiling and Def answers differ!\n";
                 goto cleanup;
             }
         }
         for(int i = 0; i < n*m; i++){
-            if(CGpu2dTilingMultThread[i] != CDef[i]){
+            if(abs(CGpu2dTilingMultThread[i] - CDef[i]) > eps){
                 cout << "Gpu 2d tiling with multiple work per processor and Def answers differ!\n";
                 goto cleanup;
             }
         }
         for(int i = 0; i < n*m; i++){
-            if(CGpu2dBlocktiling[i] != CDef[i]){
+            if(abs(CGpu2dBlocktiling[i] - CDef[i]) > eps){
                 cout << "Gpu 2d block tiling and Def answers differ!\n";
                 goto cleanup;
             }
@@ -491,7 +492,8 @@ signed main(int argc, char** argv){
         "Gpu memory coalescing time: " << gpuMemCoalTime << '\n' <<
         "Gpu 2d tiling time: " << gpu2dTilingTime << '\n' <<
         "Gpu 2d tiling time with multiple work per processor: " << gpu2dTilingMultThreadTime << '\n' << 
-        "Gpu 2d block tiling time: " << gpu2dBlocktilingTime << '\n'
+        "Gpu 2d block tiling time: " << gpu2dBlocktilingTime << '\n' <<
+        "Gpu cuBLAS reference time: " << cublasTime << '\n'
         ;
     
         cout << "Printing first few results:\n";
@@ -514,7 +516,8 @@ cleanup:
              << gpuMemCoalTime << ","
              << gpu2dTilingTime << ","
              << gpu2dTilingMultThreadTime << "," 
-             << gpu2dBlocktilingTime << "\n";
+             << gpu2dBlocktilingTime << "," 
+             << cublasTime << "\n";
     }
 
     return 0;
