@@ -10,7 +10,7 @@ const long long seed = 998244353, seed2 = 998244853, seed3 = 1e9+7;
 const float half = (seed3+1)/2;
 
 const float eps = 1.0f;
-const int softSize = 2048;
+const int softSize = 512;
 
 __global__ void GMM_hard(float *A, float *B, float *C, int n, int k, int m, bool baseline = false){
     if(blockIdx.x < softSize/128 && blockIdx.y < softSize/64 && !baseline) return;
